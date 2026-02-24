@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.things3backup.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/osascript</string>
+    <string>__SCRIPT_PATH__</string>
+  </array>
+  <!-- Schedule: substituted by install.sh -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>__HOUR__</integer>
+    <key>Minute</key>
+    <integer>__MINUTE__</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_PATH__/things3-backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_PATH__/things3-backup.err</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

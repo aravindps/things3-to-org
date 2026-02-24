@@ -1,0 +1,7 @@
+.DS_Store
+.AppleDouble
+Things3-Backups/
+*.org
+*.swp
+*~
+.idea/
