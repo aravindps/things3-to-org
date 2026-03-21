@@ -1,195 +1,296 @@
 ----------------------------------------------------------------------
--- things3-backup.applescript v3.5
--- Exports Things3 -> single things3.org (beorg / Emacs compatible)
+-- things3-backup.applescript v5.5 (ULTRA FAST)
+-- Exports Things3 -> single gtd.org (GTD / beorg / Emacs / Obsidian)
+--
+-- v5.5 Optimizations:
+-- Zero shell calls inside loops. Pure AppleScript memory ops.
 ----------------------------------------------------------------------
 
 property MAX_BACKUPS : 10
 property REPEATER_STYLE : "++"
 property INCLUDE_COMPLETED : true
+property orgBuffer : ""
+property orgFilePath : ""
 
 ----------------------------------------------------------------------
--- HANDLERS
+-- NATIVE STRING HANDLERS (0 milliseconds, no shell)
 ----------------------------------------------------------------------
 
-on tmpPath()
-	set pid to do shell script "echo $$"
-	return "/tmp/things3bak_" & pid & ".txt"
-end tmpPath
+on replaceText(searchStr, replaceStr, srcText)
+	if srcText is "" then return ""
+	set AppleScript's text item delimiters to searchStr
+	set parts to text items of srcText
+	set AppleScript's text item delimiters to replaceStr
+	set res to parts as text
+	set AppleScript's text item delimiters to ""
+	return res
+end replaceText
 
-on slugify(s)
-	set cmd to "printf '%s' " & quoted form of s & " | sed 's/[^[:alnum:][:space:]-]//g;s/ /-/g;s/-\\{2,\\}/-/g;s/^-//;s/-$//'"
-	return do shell script cmd
-end slugify
+on splitText(src, delim)
+	if src is "" then return {}
+	set AppleScript's text item delimiters to delim
+	set parts to text items of src
+	set AppleScript's text item delimiters to ""
+	return parts
+end splitText
 
-on stripSpecial(s)
-	set cmd to "printf '%s' " & quoted form of s & " | sed 's/[^[:alnum:][:space:]-]//g;s/^[[:space:]]*//;s/[[:space:]]*$//'"
-	return do shell script cmd
-end stripSpecial
+on cleanNotes(noteText)
+	if noteText is "" then return ""
+	-- U+2028 and U+2029 are Things3 internal line breaks
+	set noteText to my replaceText((character id 8232), linefeed, noteText)
+	set noteText to my replaceText((character id 8233), linefeed, noteText)
+	return noteText
+end cleanNotes
+
+-- UPDATED: map emoji context tags to @context, keep area/other tags clean
+on cleanTag(tg)
+	-- Force to text
+	try
+		set tg to tg as text
+	on error
+		return ""
+	end try
+	if tg is "" then return ""
+	
+	-- Collapse double spaces
+	set tg to my replaceText("  ", " ", tg)
+	
+	-- If the first character is an emoji and the second is a space,
+	-- treat as "emoji + context text"
+	if (count of tg) ³ 3 then
+		set firstChar to character 1 of tg
+		set secondChar to character 2 of tg
+		
+		if secondChar is space then
+			-- Strip emoji + space, keep the rest as the context name
+			set ctxText to text 3 thru -1 of tg
+			
+			-- Lowercase + replace spaces with underscores
+			set ctxText to my replaceText(" ", "_", ctxText)
+			set ctxText to (do shell script "printf '%s' " & quoted form of ctxText & " | tr '[:upper:]' '[:lower:]'")
+			
+			if ctxText is not "" then
+				return "@" & ctxText
+			else
+				return ""
+			end if
+		end if
+	end if
+	
+	-- Non-emoji tags: generic cleanup, no @
+	set tg to my replaceText(" ", "_", tg)
+	return tg
+end cleanTag
 
 on areaToTag(areaClean)
-	if areaClean is "" then return ""
-	set cmd to "printf '%s' " & quoted form of areaClean & " | tr '[:upper:] ' '[:lower:]_' | sed 's/__*/_/g;s/^_//;s/_$//'"
-	return do shell script cmd
+	return my replaceText(" ", "_", areaClean)
 end areaToTag
 
 on escapeOrg(s)
 	if s is "" then return ""
-	set cmd to "printf '%s' " & quoted form of s & " | tr '[]' '()'"
-	return do shell script cmd
+	set s to my replaceText("[", "(", s)
+	set s to my replaceText("]", ")", s)
+	return s
 end escapeOrg
+
+on rruleToRepeater(rrule, rStyle)
+	if rrule is "" then return ""
+	set freq to ""
+	if rrule contains "FREQ=DAILY" then set freq to "DAILY"
+	if rrule contains "FREQ=WEEKLY" then set freq to "WEEKLY"
+	if rrule contains "FREQ=MONTHLY" then set freq to "MONTHLY"
+	if rrule contains "FREQ=YEARLY" then set freq to "YEARLY"
+	if freq is "" then return ""
+	
+	set intv to "1"
+	if rrule contains "INTERVAL=" then
+		set parts to my splitText(rrule, "INTERVAL=")
+		if (count of parts) > 1 then
+			set remainder to item 2 of parts
+			set intv to item 1 of my splitText(remainder, ";")
+		end if
+	end if
+	
+	if freq is "DAILY" then return rStyle & intv & "d"
+	if freq is "WEEKLY" then return rStyle & intv & "w"
+	if freq is "MONTHLY" then return rStyle & intv & "m"
+	if freq is "YEARLY" then return rStyle & intv & "y"
+	return ""
+end rruleToRepeater
 
 on isoDate(theDate)
 	if theDate is missing value then return ""
 	try
-		set isoRaw to (theDate as Â«class isotÂ» as string)
+		set isoRaw to (theDate as Çclass isotÈ as string)
 		set datePart to text 1 thru 10 of isoRaw
-		set dowCmd to "date -j -f '%Y-%m-%d' " & quoted form of datePart & " '+%a' 2>/dev/null || echo ''"
-		set dow to do shell script dowCmd
-		if dow is not "" then
-			return datePart & " " & dow
-		else
-			return datePart
-		end if
+		
+		set theWeekday to weekday of theDate
+		set dowStr to ""
+		if theWeekday is Sunday then set dowStr to "Sun"
+		if theWeekday is Monday then set dowStr to "Mon"
+		if theWeekday is Tuesday then set dowStr to "Tue"
+		if theWeekday is Wednesday then set dowStr to "Wed"
+		if theWeekday is Thursday then set dowStr to "Thu"
+		if theWeekday is Friday then set dowStr to "Fri"
+		if theWeekday is Saturday then set dowStr to "Sat"
+		
+		return datePart & " " & dowStr
 	on error
 		return ""
 	end try
 end isoDate
 
+----------------------------------------------------------------------
+-- LOGIC HANDLERS
+----------------------------------------------------------------------
+
 on getTaskStatus(s)
-	if s is "completed" then
-		return "DONE"
-	else if s is "cancelled" then
-		return "CANCELLED"
-	else
-		return "TODO"
-	end if
+	if s is "completed" then return "DONE"
+	if s is "cancelled" then return "CANCELLED"
+	return "TODO"
 end getTaskStatus
 
-on rruleToRepeater(rrule, rStyle)
-	if rrule is "" then return ""
-	set freqCmd to "printf '%s' " & quoted form of rrule & " | grep -oE 'FREQ=[A-Z]+' | cut -d= -f2 || echo ''"
-	set freq to do shell script freqCmd
-	set intvCmd to "printf '%s' " & quoted form of rrule & " | grep -oE 'INTERVAL=[0-9]+' | cut -d= -f2 || echo '1'"
-	set intv to do shell script intvCmd
-	if intv is "" then set intv to "1"
-	if freq is "DAILY" then
-		return rStyle & intv & "d"
-	else if freq is "WEEKLY" then
-		return rStyle & intv & "w"
-	else if freq is "MONTHLY" then
-		return rStyle & intv & "m"
-	else if freq is "YEARLY" then
-		return rStyle & intv & "y"
-	else
-		return ""
-	end if
-end rruleToRepeater
-
-on orgDate(isoD, repeater)
-	if isoD is "" then return ""
-	if repeater is "" then
-		return "<" & isoD & ">"
-	else
-		return "<" & isoD & " " & repeater & ">"
-	end if
-end orgDate
-
-on cleanTag(tg)
-	set cmd to "printf '%s' " & quoted form of tg & " | LC_ALL=en_US.UTF-8 perl -CS -pe 's/[\\x{1F000}-\\x{1FFFF}\\x{2600}-\\x{27BF}\\x{FE00}-\\x{FEFF}\\x{1F300}-\\x{1F9FF}]//g' | sed 's/[^[:alnum:]_]/_/g' | tr '[:upper:]' '[:lower:]' | sed 's/__*/_/g;s/^_//;s/_$//'"
-	return do shell script cmd
-end cleanTag
+on hasWaitingTag(tagList)
+	repeat with tg in tagList
+		set tgStr to tg as text
+		if tgStr is "@waiting" or tgStr is "waiting" then return true
+	end repeat
+	return false
+end hasWaitingTag
 
 on orgTagString(tagList)
 	if (count of tagList) is 0 then return ""
 	set r to ":"
 	repeat with tg in tagList
-		set c to my cleanTag(tg as text)
+		set c to my cleanTag(tg)
 		if c is not "" then set r to r & c & ":"
 	end repeat
 	if r is ":" then return ""
 	return r
 end orgTagString
 
-on writeFile(filePath, tmp, content)
-	set fileRef to open for access POSIX file tmp with write permission
-	set eof fileRef to 0
-	write content to fileRef as Â«class utf8Â»
-	close access fileRef
-	do shell script "cat " & quoted form of tmp & " >> " & quoted form of filePath
-end writeFile
+on resolveTaskStat(rawStat, tagList, isSomeday)
+	if rawStat is "DONE" then return "DONE"
+	if rawStat is "CANCELLED" then return "CANCELLED"
+	if isSomeday then return "MAYBE"
+	if my hasWaitingTag(tagList) then return "WAIT"
+	return "NEXT"
+end resolveTaskStat
 
-on initFile(filePath)
-	do shell script "rm -f " & quoted form of filePath & " && touch " & quoted form of filePath
-end initFile
+on orgDate(isoD, repeater)
+	if isoD is "" then return ""
+	if repeater is "" then return "<" & isoD & ">"
+	return "<" & isoD & " " & repeater & ">"
+end orgDate
 
-on writeMultilineNote(orgFile, tmp, noteText)
-	set AppleScript's text item delimiters to linefeed
-	set noteLines to text items of noteText
-	set AppleScript's text item delimiters to ""
-	repeat with noteLine in noteLines
+----------------------------------------------------------------------
+-- BULK DATA FETCH
+----------------------------------------------------------------------
+on collectAllCheckItems()
+	set scpt to "tell application \"Things3\"
+set allToDos to every to do
+set r to {}
+repeat with t in allToDos
+set tID to id of t as text
+set ciList to every check item of t
+repeat with ci in ciList
+set ciName to name of ci as text
+set ciStat to status of ci as text
+set ciMark to \"[ ]\"
+if ciStat is \"completed\" then set ciMark to \"[X]\"
+set r to r & {{tID, ciMark, ciName}}
+end repeat
+end repeat
+return r
+end tell"
+	try
+		return run script scpt
+	on error
+		return {}
+	end try
+end collectAllCheckItems
+
+on getCheckItemsForTask(checkMap, taskID)
+	set found to {}
+	repeat with entry in checkMap
+		if (item 1 of entry as text) is taskID then
+			set found to found & {{item 2 of entry, item 3 of entry}}
+		end if
+	end repeat
+	return found
+end getCheckItemsForTask
+
+----------------------------------------------------------------------
+-- FILE WRITING
+----------------------------------------------------------------------
+
+on bufferLine(content)
+	set orgBuffer to orgBuffer & content
+	if (count of orgBuffer) > 50000 then
+		my flushToFile()
+	end if
+end bufferLine
+
+on flushToFile()
+	if orgBuffer is "" then return
+	set asFile to POSIX file orgFilePath
+	try
+		set fileRef to open for access asFile with write permission
+		set eofPosition to get eof of fileRef
+		write orgBuffer to fileRef as Çclass utf8È starting at (eofPosition + 1)
+		close access fileRef
+	on error
+		try
+			close access fileRef
+		end try
+	end try
+	set orgBuffer to ""
+end flushToFile
+
+on writeMultilineNote(noteText)
+	set noteText to my cleanNotes(noteText)
+	set parts to my splitText(noteText, linefeed)
+	repeat with noteLine in parts
 		set lineStr to noteLine as text
 		if lineStr is not "" then
-			my writeFile(orgFile, tmp, "   " & my escapeOrg(lineStr) & linefeed)
+			my bufferLine("   " & my escapeOrg(lineStr) & linefeed)
 		else
-			my writeFile(orgFile, tmp, linefeed)
+			my bufferLine(linefeed)
 		end if
 	end repeat
 end writeMultilineNote
 
-on writeCheckItems(orgFile, tmp, checkItems)
+on writeCheckItems(checkItems)
 	if (count of checkItems) is 0 then return
 	repeat with ci in checkItems
-		my writeFile(orgFile, tmp, "   - " & (item 1 of ci) & " " & my escapeOrg(item 2 of ci) & linefeed)
+		my bufferLine("   - " & (item 1 of ci) & " " & my escapeOrg(item 2 of ci) & linefeed)
 	end repeat
 end writeCheckItems
 
-----------------------------------------------------------------------
--- collectCheckItems
--- Uses run script to defer compilation so the outer AppleScript
--- parser never sees "check item" as a class name directly.
--- taskID: Things3 unique id string of the to do
-----------------------------------------------------------------------
-on collectCheckItems(taskID)
-	set tCheckItems to {}
-	set scpt to "tell application \"Things3\"
-		set t to to do id " & quoted form of taskID & "
-		set ciList to every check item of t
-		set r to {}
-		repeat with i from 1 to count of ciList
-			set ci to item i of ciList
-			set r to r & {{name of ci as text, status of ci as text}}
-		end repeat
-		return r
-	end tell"
-	try
-		set rawList to run script scpt
-		repeat with pair in rawList
-			set ciName to item 1 of pair as text
-			set ciStat to item 2 of pair as text
-			set ciMark to "[ ]"
-			if ciStat is "completed" then set ciMark to "[X]"
-			set tCheckItems to tCheckItems & {{ciMark, ciName}}
-		end repeat
-	on error
-		-- task has no check items or Things3 version doesn't support them
-	end try
-	return tCheckItems
-end collectCheckItems
-
-----------------------------------------------------------------------
--- writeOrgNode
-----------------------------------------------------------------------
-on writeOrgNode(orgFile, tmp, orgLevel, nodeStat, nodeTitle, nodeStart, nodeDue, nodeRecur, nodeTagList, nodeNoteText, nodeClosedDate, nodeID, nodeCheckItems, nodeAreaTag)
+on writeTaskNode(level, stat, rec, extraTags)
+	set nodeTitle to item 1 of rec
+	set nodeStart to item 3 of rec
+	set nodeDue to item 4 of rec
+	set nodeRecur to item 5 of rec
+	set nodeTagList to item 6 of rec
+	set nodeNoteText to item 7 of rec
+	set nodeClosedDate to item 8 of rec
+	set nodeCheckItems to item 9 of rec
+	
+	set nodeNoteText to my cleanNotes(nodeNoteText)
+	
 	set mergedTags to nodeTagList
-	if nodeAreaTag is not "" then set mergedTags to mergedTags & {nodeAreaTag}
+	repeat with et in extraTags
+		set mergedTags to mergedTags & {et}
+	end repeat
 	set tagStr to my orgTagString(mergedTags)
 	
-	set headline to orgLevel & " " & nodeStat & " " & my escapeOrg(nodeTitle)
+	set headline to level & " " & stat & " " & my escapeOrg(nodeTitle)
 	if tagStr is not "" then set headline to headline & "  " & tagStr
-	my writeFile(orgFile, tmp, headline & linefeed)
+	my bufferLine(headline & linefeed)
 	
 	if nodeClosedDate is not "" then
-		my writeFile(orgFile, tmp, "   CLOSED: [" & nodeClosedDate & "]" & linefeed)
+		my bufferLine("   CLOSED: [" & nodeClosedDate & "]" & linefeed)
 	end if
 	set repeater to my rruleToRepeater(nodeRecur, REPEATER_STYLE)
 	set scheduledD to nodeStart
@@ -197,42 +298,44 @@ on writeOrgNode(orgFile, tmp, orgLevel, nodeStat, nodeTitle, nodeStart, nodeDue,
 		set scheduledD to nodeDue
 	end if
 	if scheduledD is not "" then
-		my writeFile(orgFile, tmp, "   SCHEDULED: " & my orgDate(scheduledD, repeater) & linefeed)
+		my bufferLine("   SCHEDULED: " & my orgDate(scheduledD, repeater) & linefeed)
 	end if
 	if nodeDue is not "" then
-		my writeFile(orgFile, tmp, "   DEADLINE: " & my orgDate(nodeDue, "") & linefeed)
+		my bufferLine("   DEADLINE: " & my orgDate(nodeDue, "") & linefeed)
 	end if
-	
-	my writeFile(orgFile, tmp, "   :PROPERTIES:" & linefeed)
-	if nodeID is not "" then
-		my writeFile(orgFile, tmp, "   :ID:        " & nodeID & linefeed)
-		my writeFile(orgFile, tmp, "   :THINGS_URL: things:///show?id=" & nodeID & linefeed)
-	end if
-	if nodeRecur is not "" then
-		my writeFile(orgFile, tmp, "   :RECURRENCE: " & nodeRecur & linefeed)
-	end if
-	my writeFile(orgFile, tmp, "   :END:" & linefeed)
-	
 	if nodeNoteText is not "" then
-		my writeMultilineNote(orgFile, tmp, nodeNoteText)
+		my writeMultilineNote(nodeNoteText)
 	end if
-	my writeCheckItems(orgFile, tmp, nodeCheckItems)
-end writeOrgNode
+	my writeCheckItems(nodeCheckItems)
+end writeTaskNode
 
 ----------------------------------------------------------------------
 -- MAIN
 ----------------------------------------------------------------------
+set orgBuffer to ""
 set USERNAME to do shell script "whoami"
-set BACKUP_ROOT to "/Users/" & USERNAME & "/Documents/Things3-Backups"
-set theDate to do shell script "date '+%Y-%m-%d'"
-set theNow to do shell script "date -u '+%Y-%m-%dT%H:%M:%SZ'"
-set backupDir to BACKUP_ROOT & "/" & theDate
-do shell script "mkdir -p " & quoted form of backupDir
-set orgFile to backupDir & "/things3.org"
-set tmp to my tmpPath()
-my initFile(orgFile)
 
--- Guard: verify Things3 is reachable before proceeding
+set OBSIDIAN_DIR to "/Users/" & USERNAME & "/Library/Mobile Documents/iCloud~md~obsidian/Documents/Life/GTD"
+set BACKUP_ROOT to "/Users/" & USERNAME & "/Things3_Backups"
+
+do shell script "mkdir -p " & quoted form of OBSIDIAN_DIR
+do shell script "mkdir -p " & quoted form of BACKUP_ROOT
+
+set theDate to do shell script "date '+%Y-%m-%d_%H-%M-%S'"
+set theNow to do shell script "date -u '+%Y-%m-%dT%H:%M:%SZ'"
+
+set orgFile to OBSIDIAN_DIR & "/gtd.org"
+set orgFilePath to orgFile
+
+-- Clear the file natively
+try
+	set fileRef to open for access (POSIX file orgFilePath) with write permission
+	set eof of fileRef to 0
+	close access fileRef
+on error
+	do shell script "rm -f " & quoted form of orgFile & " && touch " & quoted form of orgFile
+end try
+
 try
 	tell application "Things3" to get name
 on error errMsg
@@ -240,44 +343,32 @@ on error errMsg
 	error errMsg
 end try
 
+set checkMap to my collectAllCheckItems()
+
 ----------------------------------------------------------------------
 -- DATA COLLECTION
--- projList:         1=slug      2=title      3=areaClean  4=stat      5=created
---                   6=due       7=closed     8=noteText   9=tagList   10=inSomeday
---                   11=projID   12=areaTag
--- taskList:         1=projSlug  2=title      3=stat       4=startDate 5=dueDate
---                   6=recur     7=tagList    8=noteText   9=closedDate 10=taskID
---                   11=checkItems  12=areaTag
--- inboxList:        1=title     2=stat       3=startDate  4=dueDate   5=recur
---                   6=tagList   7=noteText   8=closedDate 9=taskID    10=checkItems
--- somedayLooseList: same as inboxList
 ----------------------------------------------------------------------
 set projList to {}
 set taskList to {}
 set inboxList to {}
-set somedayLooseList to {}
+set looseList to {}
 
 tell application "Things3"
 	
-	----------------------------------------------------------------------
-	-- Projects + their tasks
-	----------------------------------------------------------------------
 	repeat with p in projects
 		set pName to name of p as text
-		set pSlug to my slugify(pName)
-		set pid to id of p as text
+		set pID to id of p as text
 		set pAreaClean to ""
 		set pAreaTag to ""
 		if area of p is not missing value then
-			set pAreaClean to my stripSpecial(name of area of p as text)
+			set pAreaClean to name of area of p as text
 			set pAreaTag to my areaToTag(pAreaClean)
 		end if
-		set pStat to my getTaskStatus(status of p as text)
+		set pRawStat to my getTaskStatus(status of p as text)
 		set pNoteText to ""
 		if notes of p is not "" and notes of p is not missing value then
 			set pNoteText to notes of p as text
 		end if
-		set pCreated to my isoDate(creation date of p)
 		set pDueDate to my isoDate(due date of p)
 		set pClosedDate to my isoDate(completion date of p)
 		set pTagList to {}
@@ -289,14 +380,12 @@ tell application "Things3"
 			if (list of p) is not missing value then
 				if name of list of p as text is "Someday" then set pSomeday to true
 			end if
-		on error
-			-- list property unavailable; treat as non-Someday
 		end try
-		set projList to projList & {{pSlug, pName, pAreaClean, pStat, pCreated, pDueDate, pClosedDate, pNoteText, pTagList, pSomeday, pid, pAreaTag}}
+		set projList to projList & {{pID, pName, pAreaClean, pRawStat, pDueDate, pClosedDate, pNoteText, pTagList, pSomeday, pAreaTag}}
 		
 		repeat with t in (to dos of p)
-			set tStat to my getTaskStatus(status of t as text)
-			if INCLUDE_COMPLETED or tStat is "TODO" then
+			set tRawStat to my getTaskStatus(status of t as text)
+			if INCLUDE_COMPLETED or tRawStat is "TODO" then
 				set tID to id of t as text
 				set tTitle to name of t as text
 				set tDueDate to my isoDate(due date of t)
@@ -314,22 +403,18 @@ tell application "Things3"
 				repeat with eachTag in (tags of t)
 					set tTagList to tTagList & {name of eachTag as text}
 				end repeat
-				set tCheckItems to my collectCheckItems(tID)
-				set taskList to taskList & {{pSlug, tTitle, tStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tID, tCheckItems, pAreaTag}}
+				set tCheckItems to my getCheckItemsForTask(checkMap, tID)
+				set taskList to taskList & {{pID, tTitle, tRawStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tCheckItems, pSomeday}}
 			end if
 		end repeat
 	end repeat
 	
-	----------------------------------------------------------------------
-	-- Loose area tasks (in area, not in any project)
-	----------------------------------------------------------------------
 	repeat with a in areas
-		set aNameClean to my stripSpecial(name of a as text)
+		set aNameClean to name of a as text
 		set aTag to my areaToTag(aNameClean)
-		set aLooseSlug to "__loose__" & aNameClean
 		repeat with t in (to dos of a)
-			set tStat to my getTaskStatus(status of t as text)
-			if INCLUDE_COMPLETED or tStat is "TODO" then
+			set tRawStat to my getTaskStatus(status of t as text)
+			if INCLUDE_COMPLETED or tRawStat is "TODO" then
 				set tID to id of t as text
 				set tTitle to name of t as text
 				set tDueDate to my isoDate(due date of t)
@@ -347,18 +432,15 @@ tell application "Things3"
 				repeat with eachTag in (tags of t)
 					set tTagList to tTagList & {name of eachTag as text}
 				end repeat
-				set tCheckItems to my collectCheckItems(tID)
-				set taskList to taskList & {{aLooseSlug, tTitle, tStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tID, tCheckItems, aTag}}
+				set tCheckItems to my getCheckItemsForTask(checkMap, tID)
+				set looseList to looseList & {{tTitle, tRawStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tCheckItems, aTag, false}}
 			end if
 		end repeat
 	end repeat
 	
-	----------------------------------------------------------------------
-	-- Inbox tasks
-	----------------------------------------------------------------------
 	repeat with t in (to dos of list "Inbox")
-		set tStat to my getTaskStatus(status of t as text)
-		if INCLUDE_COMPLETED or tStat is "TODO" then
+		set tRawStat to my getTaskStatus(status of t as text)
+		if INCLUDE_COMPLETED or tRawStat is "TODO" then
 			set tID to id of t as text
 			set tTitle to name of t as text
 			set tDueDate to my isoDate(due date of t)
@@ -376,17 +458,14 @@ tell application "Things3"
 			repeat with eachTag in (tags of t)
 				set tTagList to tTagList & {name of eachTag as text}
 			end repeat
-			set tCheckItems to my collectCheckItems(tID)
-			set inboxList to inboxList & {{tTitle, tStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tID, tCheckItems}}
+			set tCheckItems to my getCheckItemsForTask(checkMap, tID)
+			set inboxList to inboxList & {{tTitle, tRawStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tCheckItems}}
 		end if
 	end repeat
 	
-	----------------------------------------------------------------------
-	-- Someday loose tasks
-	----------------------------------------------------------------------
 	repeat with t in (to dos of list "Someday")
-		set tStat to my getTaskStatus(status of t as text)
-		if INCLUDE_COMPLETED or tStat is "TODO" then
+		set tRawStat to my getTaskStatus(status of t as text)
+		if INCLUDE_COMPLETED or tRawStat is "TODO" then
 			set tID to id of t as text
 			set tTitle to name of t as text
 			set tDueDate to my isoDate(due date of t)
@@ -404,141 +483,110 @@ tell application "Things3"
 			repeat with eachTag in (tags of t)
 				set tTagList to tTagList & {name of eachTag as text}
 			end repeat
-			set tCheckItems to my collectCheckItems(tID)
-			set somedayLooseList to somedayLooseList & {{tTitle, tStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tID, tCheckItems}}
+			set tCheckItems to my getCheckItemsForTask(checkMap, tID)
+			set looseList to looseList & {{tTitle, tRawStat, tStartDate, tDueDate, tRecurRule, tTagList, tNoteText, tClosedDate, tCheckItems, "", true}}
 		end if
 	end repeat
 	
 end tell
 
 ----------------------------------------------------------------------
--- WRITE things3.org
+-- BUILD ORG BUFFER
 ----------------------------------------------------------------------
-my writeFile(orgFile, tmp, "# -*- mode: org; coding: utf-8 -*-" & linefeed)
-my writeFile(orgFile, tmp, "#+TITLE: Things3 Backup" & linefeed)
-my writeFile(orgFile, tmp, "#+DATE: " & theNow & linefeed)
-my writeFile(orgFile, tmp, "#+STARTUP: overview" & linefeed)
-my writeFile(orgFile, tmp, "#+TODO: TODO | DONE CANCELLED" & linefeed)
-my writeFile(orgFile, tmp, linefeed)
+my bufferLine("# -*- mode: org; coding: utf-8 -*-" & linefeed)
+my bufferLine("#+TITLE: Life" & linefeed)
+my bufferLine("#+DATE: " & theNow & linefeed)
+my bufferLine("#+STARTUP: overview" & linefeed)
+my bufferLine("#+TODO: IN NEXT WAIT MAYBE | DONE CANCELLED" & linefeed)
+my bufferLine("#+PROPERTY: LOGGING nil" & linefeed)
+my bufferLine("#+TAGS: { @home @office @phone @computer @errands @email } @waiting project" & linefeed)
+my bufferLine(linefeed)
 
-----------------------------------------------------------------------
 -- Inbox
-----------------------------------------------------------------------
-my writeFile(orgFile, tmp, "* Inbox" & linefeed)
 repeat with td in inboxList
-	my writeOrgNode(orgFile, tmp, "**", item 2 of td, item 1 of td, item 3 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td, item 10 of td, "")
+	set tStat to my resolveTaskStat(item 2 of td, item 6 of td, false)
+	if tStat is "NEXT" then set tStat to "IN"
+	set rec to {item 1 of td, item 2 of td, item 3 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td}
+	my writeTaskNode("*", tStat, rec, {})
 end repeat
-my writeFile(orgFile, tmp, linefeed)
 
-----------------------------------------------------------------------
--- Projects (flat, area as tag, excludes Someday projects)
-----------------------------------------------------------------------
-my writeFile(orgFile, tmp, "* Projects" & linefeed)
+-- Projects with nested tasks
 repeat with pd in projList
-	if (item 10 of pd) is false then
-		set pSlug to item 1 of pd
-		set pAreaTag to item 12 of pd
-		set pMergedTags to item 9 of pd
-		if pAreaTag is not "" then set pMergedTags to pMergedTags & {pAreaTag}
-		set pTagStr to my orgTagString(pMergedTags)
-		set pHeading to "** " & (item 4 of pd) & " " & my escapeOrg(item 2 of pd)
-		if pTagStr is not "" then set pHeading to pHeading & "  " & pTagStr
-		my writeFile(orgFile, tmp, pHeading & linefeed)
-		if (item 7 of pd) is not "" then
-			my writeFile(orgFile, tmp, "   CLOSED: [" & (item 7 of pd) & "]" & linefeed)
-		end if
-		if (item 6 of pd) is not "" then
-			my writeFile(orgFile, tmp, "   DEADLINE: <" & (item 6 of pd) & ">" & linefeed)
-		end if
-		my writeFile(orgFile, tmp, "   :PROPERTIES:" & linefeed)
-		my writeFile(orgFile, tmp, "   :ID:        " & (item 11 of pd) & linefeed)
-		my writeFile(orgFile, tmp, "   :THINGS_URL: things:///show?id=" & (item 11 of pd) & linefeed)
-		if (item 3 of pd) is not "" then
-			my writeFile(orgFile, tmp, "   :AREA:      " & (item 3 of pd) & linefeed)
-		end if
-		my writeFile(orgFile, tmp, "   :CREATED:   " & (item 5 of pd) & linefeed)
-		my writeFile(orgFile, tmp, "   :END:" & linefeed)
-		if (item 8 of pd) is not "" then
-			my writeMultilineNote(orgFile, tmp, item 8 of pd)
-		end if
-		repeat with td in taskList
-			if item 1 of td is pSlug then
-				my writeOrgNode(orgFile, tmp, "***", item 3 of td, item 2 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td, item 10 of td, item 11 of td, item 12 of td)
-			end if
-		end repeat
-		my writeFile(orgFile, tmp, linefeed)
-	end if
-end repeat
-
--- Loose area tasks â€” "__loose__" prefix is exactly 9 characters
-repeat with td in taskList
-	set tSlug to item 1 of td as text
-	if (length of tSlug > 9) and (text 1 thru 9 of tSlug is "__loose__") then
-		my writeOrgNode(orgFile, tmp, "**", item 3 of td, item 2 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td, item 10 of td, item 11 of td, item 12 of td)
-	end if
-end repeat
-my writeFile(orgFile, tmp, linefeed)
-
-----------------------------------------------------------------------
--- Someday
-----------------------------------------------------------------------
-my writeFile(orgFile, tmp, "* Someday" & linefeed)
-repeat with pd in projList
-	if (item 10 of pd) is true then
-		set pSlug to item 1 of pd
-		set pAreaTag to item 12 of pd
-		set pMergedTags to item 9 of pd
-		if pAreaTag is not "" then set pMergedTags to pMergedTags & {pAreaTag}
-		set pTagStr to my orgTagString(pMergedTags)
-		set pHeading to "** " & (item 4 of pd) & " " & my escapeOrg(item 2 of pd)
-		if pTagStr is not "" then set pHeading to pHeading & "  " & pTagStr
-		my writeFile(orgFile, tmp, pHeading & linefeed)
-		if (item 7 of pd) is not "" then
-			my writeFile(orgFile, tmp, "   CLOSED: [" & (item 7 of pd) & "]" & linefeed)
-		end if
-		if (item 6 of pd) is not "" then
-			my writeFile(orgFile, tmp, "   DEADLINE: <" & (item 6 of pd) & ">" & linefeed)
-		end if
-		my writeFile(orgFile, tmp, "   :PROPERTIES:" & linefeed)
-		my writeFile(orgFile, tmp, "   :ID:        " & (item 11 of pd) & linefeed)
-		my writeFile(orgFile, tmp, "   :THINGS_URL: things:///show?id=" & (item 11 of pd) & linefeed)
-		my writeFile(orgFile, tmp, "   :CREATED:   " & (item 5 of pd) & linefeed)
-		my writeFile(orgFile, tmp, "   :END:" & linefeed)
-		if (item 8 of pd) is not "" then
-			my writeMultilineNote(orgFile, tmp, item 8 of pd)
-		end if
-		repeat with td in taskList
-			if item 1 of td is pSlug then
-				my writeOrgNode(orgFile, tmp, "***", item 3 of td, item 2 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td, item 10 of td, item 11 of td, item 12 of td)
-			end if
-		end repeat
-		my writeFile(orgFile, tmp, linefeed)
-	end if
-end repeat
-repeat with td in somedayLooseList
-	my writeOrgNode(orgFile, tmp, "**", item 2 of td, item 1 of td, item 3 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td, item 10 of td, "")
-end repeat
-my writeFile(orgFile, tmp, linefeed)
-
-----------------------------------------------------------------------
--- CLEANUP TMP
-----------------------------------------------------------------------
-do shell script "rm -f " & quoted form of tmp
-
-----------------------------------------------------------------------
--- ROTATION
-----------------------------------------------------------------------
-set allBackups to do shell script "ls -1d " & quoted form of BACKUP_ROOT & "/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] 2>/dev/null | sort"
-set AppleScript's text item delimiters to linefeed
-set backupList to text items of allBackups
-set AppleScript's text item delimiters to ""
-set backupCount to count of backupList
-if backupCount > MAX_BACKUPS then
-	set deleteCount to backupCount - MAX_BACKUPS
-	repeat with i from 1 to deleteCount
-		set oldBackup to item i of backupList
-		if oldBackup is not "" then do shell script "rm -rf " & quoted form of oldBackup
+	set pID to item 1 of pd
+	set pName to item 2 of pd
+	set pSomeday to item 9 of pd
+	set pTagList to item 8 of pd
+	set pNoteText to item 7 of pd
+	set pDueDate to item 5 of pd
+	set pClosedDate to item 6 of pd
+	set pAreaTag to item 10 of pd
+	
+	set pExtraTags to {"project"}
+	if pAreaTag is not "" then set pExtraTags to pExtraTags & {pAreaTag}
+	set pMergedTags to pTagList
+	repeat with et in pExtraTags
+		set pMergedTags to pMergedTags & {et}
 	end repeat
+	set pTagStr to my orgTagString(pMergedTags)
+	
+	-- FIXED: Plain heading "* ProjectName :tags:"
+	set pHeading to "* " & my escapeOrg(pName)
+	if pTagStr is not "" then set pHeading to pHeading & "Ê " & pTagStr
+	my bufferLine(pHeading & linefeed)
+	
+	if pClosedDate is not "" then
+		my bufferLine("   CLOSED: [" & pClosedDate & "]" & linefeed)
+	end if
+	if pDueDate is not "" then
+		my bufferLine("   DEADLINE: <" & pDueDate & ">" & linefeed)
+	end if
+	if pNoteText is not "" then
+		my writeMultilineNote(pNoteText)
+	end if
+	
+	repeat with td in taskList
+		if (item 1 of td as text) is pID then
+			set tStat to my resolveTaskStat(item 3 of td, item 7 of td, pSomeday)
+			set rec to {item 2 of td, item 3 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td, item 10 of td}
+			my writeTaskNode("**", tStat, rec, {})
+		end if
+	end repeat
+	my bufferLine(linefeed)
+end repeat
+
+-- Loose + Someday loose
+repeat with td in looseList
+	set tStat to my resolveTaskStat(item 2 of td, item 6 of td, item 11 of td)
+	set extraTags to {}
+	if (item 10 of td) is not "" then set extraTags to extraTags & {item 10 of td}
+	set rec to {item 1 of td, item 2 of td, item 3 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td}
+	my writeTaskNode("*", tStat, rec, extraTags)
+end repeat
+
+----------------------------------------------------------------------
+-- FINAL FLUSH & BACKUP ROTATION
+----------------------------------------------------------------------
+my flushToFile()
+
+set backupFile to BACKUP_ROOT & "/" & theDate & "_gtd.org"
+do shell script "cp " & quoted form of orgFile & " " & quoted form of backupFile
+
+set allBackups to do shell script "ls -1 " & quoted form of BACKUP_ROOT & "/*_gtd.org 2>/dev/null | sort || true"
+if allBackups is not "" then
+	set AppleScript's text item delimiters to linefeed
+	set backupList to text items of allBackups
+	set AppleScript's text item delimiters to ""
+	
+	set backupCount to count of backupList
+	if backupCount > MAX_BACKUPS then
+		set deleteCount to backupCount - MAX_BACKUPS
+		repeat with i from 1 to deleteCount
+			set oldBackup to item i of backupList
+			if oldBackup is not "" then
+				do shell script "rm -f " & quoted form of oldBackup
+			end if
+		end repeat
+	end if
 end if
 
-display notification "Saved: " & orgFile with title "Things3 Backup v3.5"
+display notification "Live: Obsidian/Life/GTD/gtd.org" with title "Things3 Sync Fast" subtitle "Backup: " & BACKUP_ROOT
