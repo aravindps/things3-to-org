@@ -172,7 +172,7 @@ end orgTagString
 on resolveTaskStat(rawStat, tagList, isSomeday)
 	if rawStat is "DONE" then return "DONE"
 	if rawStat is "CANCELLED" then return "CANCELLED"
-	if isSomeday then return "MAYBE"
+	if isSomeday then return "SOMEDAY"
 	if my hasWaitingTag(tagList) then return "WAIT"
 	return "NEXT"
 end resolveTaskStat
@@ -497,7 +497,7 @@ my bufferLine("# -*- mode: org; coding: utf-8 -*-" & linefeed)
 my bufferLine("#+TITLE: Life" & linefeed)
 my bufferLine("#+DATE: " & theNow & linefeed)
 my bufferLine("#+STARTUP: overview" & linefeed)
-my bufferLine("#+TODO: IN NEXT WAIT MAYBE | DONE CANCELLED" & linefeed)
+my bufferLine("#+TODO: IN NEXT WAIT SOMEDAY | DONE CANCELLED" & linefeed)
 my bufferLine("#+PROPERTY: LOGGING nil" & linefeed)
 my bufferLine("#+TAGS: { @home @office @phone @computer @errands @email } @waiting project" & linefeed)
 my bufferLine(linefeed)
