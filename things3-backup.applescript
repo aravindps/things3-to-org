@@ -503,12 +503,13 @@ my bufferLine("#+TAGS: { @home @office @phone @computer @errands @email } @waiti
 my bufferLine(linefeed)
 
 -- Inbox
+my bufferLine("* Inbox" & linefeed)
 repeat with td in inboxList
 	set tStat to my resolveTaskStat(item 2 of td, item 6 of td, false)
-	if tStat is "NEXT" then set tStat to "IN"
 	set rec to {item 1 of td, item 2 of td, item 3 of td, item 4 of td, item 5 of td, item 6 of td, item 7 of td, item 8 of td, item 9 of td}
-	my writeTaskNode("*", tStat, rec, {})
+	my writeTaskNode("**", tStat, rec, {})
 end repeat
+my bufferLine(linefeed)
 
 -- Projects with nested tasks
 repeat with pd in projList
@@ -521,12 +522,8 @@ repeat with pd in projList
 	set pClosedDate to item 6 of pd
 	set pAreaTag to item 10 of pd
 	
-	set pExtraTags to {"project"}
-	if pAreaTag is not "" then set pExtraTags to pExtraTags & {pAreaTag}
 	set pMergedTags to pTagList
-	repeat with et in pExtraTags
-		set pMergedTags to pMergedTags & {et}
-	end repeat
+	if pAreaTag is not "" then set pMergedTags to pMergedTags & {pAreaTag}
 	set pTagStr to my orgTagString(pMergedTags)
 	
 	-- FIXED: Plain heading "* ProjectName :tags:"
